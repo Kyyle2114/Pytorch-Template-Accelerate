@@ -1,5 +1,10 @@
 #!/bin/bash
 
+# Set which GPUs to use (e.g., "0,1" or "0,1,2,3").
+# The script will automatically count them to set the number of processes for torchrun.
+# If this variable is not set, torch will use all available GPUs.
+export CUDA_VISIBLE_DEVICES=0,1,2,3
+
 # Exit on any error
 set -e
 
@@ -28,11 +33,13 @@ if ! python -c "import accelerate" &> /dev/null; then
     exit 1
 fi
 
-print_info "Starting CIFAR-10 training with Accelerate..."
+# Automatically determine the number of GPUs from CUDA_VISIBLE_DEVICES
+# or all available GPUs if the variable is not set.
+N_GPUS=$(python -c 'import torch; print(torch.cuda.device_count())')
 
-# Set which GPUs to use (e.g., "0,1" or "0,1,2,3").
-# Accelerate will automatically detect and use the available GPUs.
-export CUDA_VISIBLE_DEVICES=0,1
+echo "Using $N_GPUS GPUs based on CUDA_VISIBLE_DEVICES..."
+
+print_info "Starting CIFAR-10 training with Accelerate..."
 
 # Set WandB mode (online, offline, or disabled)
 # For better automation, set WANDB_API_KEY environment variable
@@ -50,21 +57,22 @@ export PYTHONPATH="${PYTHONPATH}:."
 # Run training using accelerate launch with proper error handling
 print_info "Launching training with the following configuration:"
 print_info "  - GPUs: $CUDA_VISIBLE_DEVICES"
+print_info "  - Num Processes: $N_GPUS"
 print_info "  - Output directory: ${OUTPUT_DIR}"
 print_info "  - Dataset path: ./dataset"
 print_info "  - Batch size: 32"
 print_info "  - Epochs: 100"
 print_info "  - Learning rate: 1e-3"
 
-accelerate launch main.py \
+accelerate launch --num_processes=$N_GPUS main.py \
     --output_dir "${OUTPUT_DIR}" \
     --dataset_path ./dataset \
     --num_workers 4 \
     --batch_size 32 \
-    --epoch 100 \
+    --epoch 5 \
     --lr 1e-3 \
     --weight_decay 1e-4 \
-    --warmup_epochs 5 \
+    --warmup_epochs 1 \
     --patience 20 \
     --clip_grad 1.0 \
     --project_name "CIFAR10-Training-Accelerate" \

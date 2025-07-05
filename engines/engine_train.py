@@ -153,6 +153,9 @@ def evaluate(
         accelerator.print(error_msg)
         raise RuntimeError(error_msg)
 
+    # close the progress bar to ensure it is finalized before printing the metrics
+    progress_bar.close()
+
     # concatenate all gathered tensors
     all_preds = torch.cat(all_preds, dim=0)
     all_labels = torch.cat(all_labels, dim=0)
@@ -163,8 +166,8 @@ def evaluate(
         avg_loss = total_loss / len(all_labels)
         acc1, acc5 = accuracy(all_preds, all_labels, topk=(1, 5))
         
-        print(f'* Acc@1 {acc1.item():.3f} Acc@5 {acc5.item():.3f} loss {avg_loss:.3f}')
-        print()
+        # use standard print after closing the progress bar
+        print(f'* Acc@1 {acc1.item():.3f} Acc@5 {acc5.item():.3f} loss {avg_loss:.3f} \n')
         
         return {
             'loss': avg_loss,

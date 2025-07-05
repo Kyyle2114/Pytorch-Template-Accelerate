@@ -9,6 +9,7 @@ from pathlib import Path
 from accelerate import Accelerator
 import warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
+warnings.simplefilter(action='ignore', category=UserWarning)
 
 import torch
 import torch.nn as nn 
@@ -377,7 +378,7 @@ def main(args: argparse.Namespace) -> None:
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     print(f'Training completed in {total_time_str}')
-    print(f'Best validation accuracy: {max_accuracy:.2f}%')
+    print(f'Best validation accuracy: {max_accuracy:.2f}% \n')
     
     # end wandb tracking
     if accelerator.is_main_process:
