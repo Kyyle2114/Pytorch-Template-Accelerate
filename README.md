@@ -7,7 +7,7 @@
 [![Accelerate](https://img.shields.io/badge/🤗-Accelerate-yellow.svg)](https://huggingface.co/docs/accelerate)
 [![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
 
-Structured and modular template for deep learning model training with enterprise-grade code quality.
+Structured and modular template for deep learning model training with hugging face's accelerate.
 
 ## ✨ Features
 

@@ -194,7 +194,6 @@ results/
 logs/
 log/
 checkpoints/
-models/
 saved_models/
 experiments/
 runs/
@@ -202,7 +201,6 @@ runs/
 # Dataset files (usually too large for git)
 data/
 datasets/
-dataset/
 *.zip
 *.tar
 *.tar.gz
