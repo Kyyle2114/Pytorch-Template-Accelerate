@@ -1,0 +1,9 @@
+torch
+torchvision
+numpy
+wandb
+torchinfo
+opencv-python
+timm
+accelerate
+tqdm
