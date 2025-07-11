@@ -1,10 +1,13 @@
 import math
+import argparse
 from typing import Iterable, Dict, Any, Optional
 from timm.utils import accuracy
 from tqdm.auto import tqdm
 from accelerate import Accelerator
 
 import torch
+
+from utils.misc import MetricTracker
 
 def train_one_epoch(
     model: torch.nn.Module,
@@ -13,84 +16,140 @@ def train_one_epoch(
     optimizer: torch.optim.Optimizer,
     accelerator: Accelerator, 
     epoch: int, 
-    args: Optional[Any] = None
+    args: Optional[argparse.Namespace] = None,
+    metrics_tracker: Optional[MetricTracker] = None
 ) -> Dict[str, float]:
     """
     Train the model for one epoch using Accelerate.
 
     Args:
-        model (torch.nn.Module): PyTorch Model
-        data_loader (Iterable): PyTorch DataLoader
-        criterion (torch.nn.Module): PyTorch loss function
-        optimizer (torch.optim.Optimizer): PyTorch optimizer
-        accelerator (Accelerator): Accelerator object for distributed training
-        epoch (int): Current epoch number
-        args (Optional[Any]): Parsed arguments
+        model: PyTorch model to train
+        data_loader: PyTorch DataLoader for training data
+        criterion: PyTorch loss function 
+        optimizer: PyTorch optimizer
+        accelerator: Accelerator object for distributed training
+        epoch: Current epoch number
+        args: Parsed arguments containing gradient clipping and batch size info
+        metrics_tracker: Optional reusable MetricTracker instance
 
     Returns:
-        Dict[str, float]: Dictionary containing the global average for each metric,
-                          such as training loss and learning rate.
-                         
+        Dictionary containing the global average for each metric:
+        - loss: Average training loss across all processes
+        - lr: Current learning rate
+    
     Raises:
         RuntimeError: If loss becomes infinite or NaN
         ValueError: If invalid gradient clipping value is provided
-    """
-    model.train()
-    
-    total_loss = 0.0
-    
-    # setup progress bar
-    progress_bar = tqdm(
-        range(len(data_loader)), 
-        disable=not accelerator.is_main_process,
-        desc=f"Epoch {epoch}",
-        dynamic_ncols=True
-    )
-
-    optimizer.zero_grad()
+        TypeError: If arguments have wrong types
         
-    for step, (samples, targets) in enumerate(data_loader):
-        with accelerator.accumulate(model):
-            outputs = model(samples)
-            loss = criterion(outputs, targets)
-            
-            # we gather the loss before backward pass
-            # to avoid blocking the main process
-            avg_loss = accelerator.gather(loss.repeat(args.batch_size)).mean()
-            total_loss += avg_loss.item() / args.accum_iter
-            
-            loss_value = loss.item()
-
-            if not math.isfinite(loss_value):
-                error_msg = f"Loss is {loss_value}, stopping training\n"
-                accelerator.print(error_msg)
-                raise RuntimeError(error_msg)
-
-            # backward pass with accelerator
-            accelerator.backward(loss)
-            
-            # gradient clipping
-            if args and args.clip_grad is not None:
-                if args.clip_grad <= 0:
-                    raise ValueError(f"clip_grad must be positive, got {args.clip_grad}")
-                accelerator.clip_grad_norm_(model.parameters(), args.clip_grad)
-            
-            optimizer.step()
-            optimizer.zero_grad()
-            
-        # update progress bar
-        if accelerator.is_main_process:
-            progress_bar.update(1)
-            lr = optimizer.param_groups[0]["lr"]
-            progress_bar.set_postfix(
-                loss=total_loss / (step + 1),
-                lr=f"{lr:.6f}"
+    Example:
+        ```python
+        # standard distributed training with reusable metrics tracker
+        metrics_tracker = MetricTracker()
+        for epoch in range(num_epochs):
+            train_stats = train_one_epoch(
+                model=model,
+                data_loader=train_loader, 
+                criterion=criterion,
+                optimizer=optimizer,
+                accelerator=accelerator,
+                epoch=epoch,
+                args=args,
+                metrics_tracker=metrics_tracker
             )
+            print(f"Training Loss: {train_stats['loss']:.4f}")
+        ```
+    """
+    # input validation
+    if not isinstance(model, torch.nn.Module):
+        raise TypeError(f"model must be a torch.nn.Module, got {type(model)}")
+    if not isinstance(criterion, torch.nn.Module):
+        raise TypeError(f"criterion must be a torch.nn.Module, got {type(criterion)}")
+    if not isinstance(optimizer, torch.optim.Optimizer):
+        raise TypeError(f"optimizer must be a torch.optim.Optimizer, got {type(optimizer)}")
+    if not isinstance(accelerator, Accelerator):
+        raise TypeError(f"accelerator must be an Accelerator, got {type(accelerator)}")
+    if not isinstance(epoch, int):
+        raise TypeError(f"epoch must be an integer, got {type(epoch)}")
+    
+    try:
+        model.train()
         
-    return {
-        'loss': total_loss / len(data_loader),
-        'lr': optimizer.param_groups[0]["lr"]
-    }
+        # initialize or reset metrics tracker
+        if metrics_tracker is None:
+            metrics_tracker = MetricTracker()
+        else:
+            metrics_tracker.reset()
+        
+        progress_bar = tqdm(
+            range(len(data_loader)), 
+            disable=not accelerator.is_main_process,
+            desc=f"Epoch {epoch}",
+            dynamic_ncols=True,
+            ncols=100
+        )
+
+        optimizer.zero_grad()
+            
+        for step, (samples, targets) in enumerate(data_loader):
+            batch_size = samples.size(0)
+            
+            with accelerator.accumulate(model):
+                outputs = model(samples)
+                loss = criterion(outputs, targets)
+                
+                # store with batch size for accurate averaging
+                metrics_tracker.update({'loss': loss}, batch_size=batch_size)
+                
+                loss_value = loss.item()
+
+                if not math.isfinite(loss_value):
+                    error_msg = f"Loss is {loss_value}, stopping training"
+                    accelerator.print(error_msg)
+                    raise RuntimeError(error_msg)
+
+                # backward pass with accelerator
+                accelerator.backward(loss)
+                
+                # gradient clipping
+                if args and hasattr(args, 'clip_grad') and args.clip_grad is not None:
+                    if args.clip_grad <= 0:
+                        raise ValueError(f"clip_grad must be positive, got {args.clip_grad}")
+                    accelerator.clip_grad_norm_(model.parameters(), args.clip_grad)
+                
+                optimizer.step()
+                optimizer.zero_grad()
+                
+            # progress bar shows current local averages
+            if accelerator.is_main_process:
+                progress_bar.update(1)
+                lr = optimizer.param_groups[0]["lr"]
+                current_averages = metrics_tracker.get_current_averages()
+                progress_bar.set_postfix({
+                    'loss': f"{current_averages.get('loss', 0.0):.4f}",
+                    'lr': f"{lr:.6f}"
+                })
+        
+        # clean up progress bar
+        if accelerator.is_main_process:
+            progress_bar.close()
+        
+        # compute global averages only once at epoch end
+        avg_stats = metrics_tracker.compute_epoch_averages(accelerator)
+        avg_stats['lr'] = optimizer.param_groups[0]["lr"]
+        
+        if accelerator.is_main_process:
+            print(f"Training Epoch {epoch} - "
+                  f"Loss: {avg_stats.get('loss', 0.0):.4f}, "
+                  f"LR: {avg_stats['lr']:.6f}")
+        
+        return avg_stats
+        
+    except Exception as e:
+        # clean up resources on error
+        if 'progress_bar' in locals() and accelerator.is_main_process:
+            progress_bar.close()
+        raise RuntimeError(f"Training failed: {e}")
 
 
 @torch.no_grad()
@@ -101,80 +160,99 @@ def evaluate(
     accelerator: Accelerator
 ) -> Dict[str, float]:
     """
-    Evaluate the model using Accelerate.
+    Evaluate the model using Accelerate with improved accuracy calculation.
 
     Args:
-        model (torch.nn.Module): PyTorch Model
-        data_loader (Iterable): PyTorch DataLoader for validation/test set
-        criterion (torch.nn.Module): PyTorch loss function
-        accelerator (Accelerator): Accelerator object for distributed training
+        model: PyTorch model to evaluate
+        data_loader: PyTorch DataLoader for validation/test set
+        criterion: PyTorch loss function
+        accelerator: Accelerator object for distributed training
 
     Returns:
-        Dict[str, float]: Dictionary containing the global average for each metric,
-                          such as validation accuracy and loss.
-                         
+        Dictionary containing the global average for each metric:
+        - loss: Average validation loss across all processes
+        - acc1: Top-1 accuracy percentage
+        - acc5: Top-5 accuracy percentage
+    
     Raises:
         RuntimeError: If evaluation encounters unexpected errors
+        TypeError: If arguments have wrong types
+        
+    Example:
+        ```python
+        eval_stats = evaluate(
+            model=model,
+            data_loader=val_loader,
+            criterion=criterion,
+            accelerator=accelerator
+        )
+        print(f"Validation Acc@1: {eval_stats['acc1']:.2f}%")
+        print(f"Validation Loss: {eval_stats['loss']:.4f}")
+        ```
     """
-    model.eval()
-
-    all_preds = []
-    all_labels = []
-    total_loss = 0.0
-    
-    progress_bar = tqdm(
-        range(len(data_loader)), 
-        disable=not accelerator.is_main_process,
-        desc="Evaluating",
-        dynamic_ncols=True
-    )
+    # input validation
+    if not isinstance(model, torch.nn.Module):
+        raise TypeError(f"model must be a torch.nn.Module, got {type(model)}")
+    if not isinstance(criterion, torch.nn.Module):
+        raise TypeError(f"criterion must be a torch.nn.Module, got {type(criterion)}")
+    if not isinstance(accelerator, Accelerator):
+        raise TypeError(f"accelerator must be an Accelerator, got {type(accelerator)}")
 
     try:
+        model.eval()
+
+        # initialize metrics tracker for evaluation
+        metrics_tracker = MetricTracker()
+        
+        progress_bar = tqdm(
+            range(len(data_loader)), 
+            disable=not accelerator.is_main_process,
+            desc="Evaluating",
+            dynamic_ncols=True,
+            ncols=100
+        )
+
         for _, (images, targets) in enumerate(data_loader):
+            batch_size = images.size(0)
+            
             outputs = model(images)
             loss = criterion(outputs, targets)
             
-            # gather predictions and labels from all processes
-            gathered_preds = accelerator.gather_for_metrics(outputs)
-            gathered_labels = accelerator.gather_for_metrics(targets)
+            # accuracy calculation - returns percentages
+            acc1, acc5 = accuracy(outputs, targets, topk=(1, 5))
             
-            all_preds.append(gathered_preds.cpu())
-            all_labels.append(gathered_labels.cpu())
-
-            # calculate the sum of losses for the current global batch and add to total_loss
-            local_loss_sum = loss * images.size(0)
-            total_loss += accelerator.gather(local_loss_sum).sum().item()
+            # update metrics tracker with batch results
+            metrics_tracker.update({
+                'loss': loss,
+                'acc1': acc1,  # timm's accuracy already returns percentages
+                'acc5': acc5
+            }, batch_size=batch_size)
             
             if accelerator.is_main_process:
                 progress_bar.update(1)
-                
+                # show current running averages
+                current_averages = metrics_tracker.get_current_averages()
+                progress_bar.set_postfix({
+                    'loss': f"{current_averages.get('loss', 0.0):.4f}",
+                    'acc1': f"{current_averages.get('acc1', 0.0):.2f}%"
+                })
+
+        # clean up progress bar
+        if accelerator.is_main_process:
+            progress_bar.close()
+
+        # compute global averages using MetricTracker
+        avg_stats = metrics_tracker.compute_epoch_averages(accelerator)
+
+        if accelerator.is_main_process:
+            print(f'* Acc@1 {avg_stats.get("acc1", 0.0):.3f} Acc@5 {avg_stats.get("acc5", 0.0):.3f} loss {avg_stats.get("loss", 0.0):.3f}')
+            
+        return avg_stats
+        
     except Exception as e:
-        error_msg = f"Error during evaluation: {e}\n"
+        # clean up resources on error
+        if 'progress_bar' in locals() and accelerator.is_main_process:
+            progress_bar.close()
+        error_msg = f"Evaluation failed: {e}"
         accelerator.print(error_msg)
         raise RuntimeError(error_msg)
-
-    # close the progress bar to ensure it is finalized before printing the metrics
-    progress_bar.close()
-
-    # concatenate all gathered tensors
-    all_preds = torch.cat(all_preds, dim=0)
-    all_labels = torch.cat(all_labels, dim=0)
-    
-    # calculate metrics on the main process
-    if accelerator.is_main_process:
-        # calculate average loss over all samples
-        avg_loss = total_loss / len(all_labels)
-        acc1, acc5 = accuracy(all_preds, all_labels, topk=(1, 5))
-        
-        # use standard print after closing the progress bar
-        print(f'* Acc@1 {acc1.item():.3f} Acc@5 {acc5.item():.3f} loss {avg_loss:.3f} \n')
-        
-        return {
-            'loss': avg_loss,
-            'acc1': acc1.item(),
-            'acc5': acc5.item()
-        }
-    
-    # for other processes, return empty dict or sync results
-    # returning results from main process is sufficient for most cases
-    return {}

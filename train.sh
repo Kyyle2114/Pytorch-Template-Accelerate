@@ -35,9 +35,15 @@ fi
 
 # Automatically determine the number of GPUs from CUDA_VISIBLE_DEVICES
 # or all available GPUs if the variable is not set.
-N_GPUS=$(python -c 'import torch; print(torch.cuda.device_count())')
-
-echo "Using $N_GPUS GPUs based on CUDA_VISIBLE_DEVICES..."
+if [ -n "$CUDA_VISIBLE_DEVICES" ]; then
+    # Parse CUDA_VISIBLE_DEVICES to count specified GPUs
+    N_GPUS=$(echo $CUDA_VISIBLE_DEVICES | tr ',' '\n' | wc -l)
+    echo "Using $N_GPUS GPUs from CUDA_VISIBLE_DEVICES: $CUDA_VISIBLE_DEVICES"
+else
+    # Use all available GPUs if CUDA_VISIBLE_DEVICES is not set
+    N_GPUS=$(python -c 'import torch; print(torch.cuda.device_count())')
+    echo "Using all $N_GPUS available GPUs"
+fi
 
 print_info "Starting CIFAR-10 training with Accelerate..."
 

@@ -50,8 +50,8 @@ class CosineAnnealingWarmUpRestarts(_LRScheduler):
             raise ValueError(f"Expected non-negative integer T_up, but got {T_up}")
         if eta_max <= 0:
             raise ValueError(f"Expected positive eta_max, but got {eta_max}")
-        if T_up >= T_0:
-            raise ValueError(f"T_up ({T_up}) must be less than T_0 ({T_0})")
+        if T_up > T_0:
+            raise ValueError(f"T_up ({T_up}) must be less than or equal to T_0 ({T_0})")
             
         self.T_0 = T_0
         self.T_mult = T_mult

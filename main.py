@@ -133,12 +133,13 @@ def main(args: argparse.Namespace) -> None:
         output_path = Path(args.output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
         
-        # save args as JSON file
+        # save args as JSON file with timestamp
         args_dict = vars(args)
-        args_file_path = output_path / 'args.json'
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        args_file_path = output_path / f'args_{timestamp}.json'
         
         try:
-            with open(args_file_path, mode="a", encoding="utf-8") as f:
+            with open(args_file_path, mode="w", encoding="utf-8") as f:
                 json.dump(args_dict, f, indent=4)
         
         except IOError as e:
@@ -269,13 +270,16 @@ def main(args: argparse.Namespace) -> None:
     max_accuracy = 0.0  # for evaluation
     max_loss = np.inf   # for evaluation 
     
-    # early stopping: determined based on the validation loss (lower is better)
-    es = misc.EarlyStopping(patience=args.patience, delta=0, mode='min', verbose=True)
+    # early stopping: distributed-aware version
+    es = misc.DistributedEarlyStopping(patience=args.patience, delta=0, mode='min', verbose=True)
+    
+    # initialize reusable metrics tracker for training
+    metrics_tracker = misc.MetricTracker()
     
     # training loop
     try:
         for epoch in range(args.epoch):
-            # model train
+            # model train with reusable metrics tracker
             train_stats = engine_train.train_one_epoch(
                 model=model, 
                 data_loader=train_loader,
@@ -283,20 +287,20 @@ def main(args: argparse.Namespace) -> None:
                 optimizer=optimizer,
                 accelerator=accelerator,
                 epoch=epoch,
-                args=args
+                args=args,
+                metrics_tracker=metrics_tracker
             )
             
             # save model checkpoint periodically
             if args.output_dir and (epoch % 20 == 0 or epoch + 1 == args.epoch):
-                accelerator.wait_for_everyone()
-                if accelerator.is_main_process:
-                    try:
+                try:
+                    if accelerator.is_main_process:
                         save_dir = Path(args.output_dir) / f"checkpoint-{epoch}"
                         accelerator.save_state(save_dir)
-                        accelerator.print(f"Periodic checkpoint saved to {save_dir}\n")
+                        accelerator.print(f"Periodic checkpoint saved to {save_dir}")
                     
-                    except Exception as e:
-                        accelerator.print(f"Warning: Failed to save periodic checkpoint: {e}\n")
+                except Exception as e:
+                    accelerator.print(f"Warning: Failed to save periodic checkpoint: {e}")
                 
             scheduler.step()
                 
@@ -323,10 +327,10 @@ def main(args: argparse.Namespace) -> None:
                     try:
                         save_dir = Path(args.output_dir) / "best_model"
                         accelerator.save_state(save_dir)
-                        accelerator.print(f"Best model saved to {save_dir}\n")
+                        accelerator.print(f"Best model saved to {save_dir}")
 
                     except Exception as e:
-                        accelerator.print(f"Warning: Failed to save best model: {e}\n")
+                        accelerator.print(f"Warning: Failed to save best model: {e}")
 
                 # stats logging to file
                 if args.output_dir:
@@ -361,24 +365,26 @@ def main(args: argparse.Namespace) -> None:
                 except Exception as e:
                     print(f"Warning: Failed to log to WandB: {e}\n")
                         
-                # check early stopping
-                es(val_loss)
-                if es.early_stop:
+                # check early stopping with distributed synchronization
+                should_stop = es(val_loss, accelerator)
+                if should_stop:
                     print(f'[INFO] Early stopping triggered at epoch {epoch+1}\n')
-                    # we must sync processes before breaking the loop
-                    accelerator.wait_for_everyone()
+                    # sync is already handled by DistributedEarlyStopping
                     break
                 
     except KeyboardInterrupt:
-        print("\n[INFO] Training interrupted by user\n")
+        print("\n[INFO] Training interrupted by user")
         
     except Exception as e:
-        raise RuntimeError(f"Training failed: {e}\n")
+        raise RuntimeError(f"Training failed: {e}")
+    
+    finally:
+        pass  # Python's automatic garbage collection is sufficient
     
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     print(f'Training completed in {total_time_str}')
-    print(f'Best validation accuracy: {max_accuracy:.2f}% \n')
+    print(f'Best validation accuracy: {max_accuracy:.2f}%')
     
     # end wandb tracking
     if accelerator.is_main_process:
@@ -386,7 +392,7 @@ def main(args: argparse.Namespace) -> None:
             accelerator.end_training()
         
         except Exception as e:
-            print(f"Warning: Failed to properly end WandB tracking: {e}\n")
+            print(f"Warning: Failed to properly end WandB tracking: {e}")
     
     
 if __name__ == '__main__': 
