@@ -91,7 +91,7 @@ def train_one_epoch(
 
         optimizer.zero_grad()
             
-        for step, (samples, targets) in enumerate(data_loader):
+        for _, (samples, targets) in enumerate(data_loader):
             batch_size = samples.size(0)
             
             with accelerator.accumulate(model):
@@ -139,9 +139,9 @@ def train_one_epoch(
         avg_stats['lr'] = optimizer.param_groups[0]["lr"]
         
         if accelerator.is_main_process:
-            print(f"Training Epoch {epoch} - "
-                  f"Loss: {avg_stats.get('loss', 0.0):.4f}, "
-                  f"Learning Rate: {avg_stats['lr']:.6f} \n")
+            loss = avg_stats.get('loss', 0.0)
+            lr = avg_stats['lr']
+            accelerator.print(f"Training Epoch {epoch} - Loss: {loss:.4f}, Learning Rate: {lr:.6f} \n")
         
         return avg_stats
         
@@ -245,7 +245,10 @@ def evaluate(
         avg_stats = metrics_tracker.compute_epoch_averages(accelerator)
 
         if accelerator.is_main_process:
-            print(f'* Acc@1 {avg_stats.get("acc1", 0.0):.3f} Acc@5 {avg_stats.get("acc5", 0.0):.3f} loss {avg_stats.get("loss", 0.0):.3f} \n')
+            acc1 = avg_stats.get("acc1", 0.0)
+            acc5 = avg_stats.get("acc5", 0.0)
+            loss = avg_stats.get("loss", 0.0)
+            accelerator.print(f'* Acc@1: {acc1:.3f} Acc@5: {acc5:.3f} Loss: {loss:.3f} \n')
             
         return avg_stats
         
@@ -253,6 +256,7 @@ def evaluate(
         # clean up resources on error
         if 'progress_bar' in locals() and accelerator.is_main_process:
             progress_bar.close()
+        
         error_msg = f"Evaluation failed: {e}"
         accelerator.print(error_msg)
         raise RuntimeError(error_msg)

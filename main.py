@@ -255,11 +255,11 @@ def main(args: argparse.Namespace) -> None:
         try:
             # log additional configurations to wandb through accelerator
             accelerator.log({
-                'optimizer': type(optimizer).__name__,
-                'scheduler': type(scheduler).__name__,
-                'batch_size_accumulated': args.batch_size * args.accum_iter,
-                'effective_batch_size': eff_batch_size,
-                'num_parameters': n_parameters
+                'config/batch_size_per_gpu': args.batch_size,
+                'config/gradient_accumulation_steps': args.accum_iter,
+                'config/num_processes': accelerator.num_processes,
+                'config/effective_batch_size': eff_batch_size,
+                'config/num_parameters': n_parameters
             }, step=0)
         
         except Exception as e:
@@ -270,8 +270,8 @@ def main(args: argparse.Namespace) -> None:
     max_accuracy = 0.0  # for evaluation
     max_loss = np.inf   # for evaluation 
     
-    # early stopping: distributed-aware version
-    es = misc.DistributedEarlyStopping(patience=args.patience, delta=0, mode='min', verbose=True)
+    # early stopping: lower is better ('min' mode)
+    es = misc.DistributedEarlyStopping(patience=args.patience, delta=0.5, mode='min', verbose=True) #0.5 for test
     
     # initialize reusable metrics tracker for training
     metrics_tracker = misc.MetricTracker()
@@ -297,7 +297,7 @@ def main(args: argparse.Namespace) -> None:
                     if accelerator.is_main_process:
                         save_dir = Path(args.output_dir) / f"checkpoint-{epoch}"
                         accelerator.save_state(save_dir)
-                        accelerator.print(f"Periodic checkpoint saved to {save_dir} \n")
+                        accelerator.print(f"[INFO] Periodic checkpoint saved to {save_dir} \n")
                     
                 except Exception as e:
                     accelerator.print(f"Warning: Failed to save periodic checkpoint: {e}")
@@ -314,20 +314,20 @@ def main(args: argparse.Namespace) -> None:
             
             # validation on main process
             if accelerator.is_main_process:
-                print(f"[INFO] Accuracy of the network on the {len(val_set)} test images: {eval_stats['acc1']:.1f}%")
+                accelerator.print(f"[INFO] Accuracy of the network on the {len(val_set)} test images: {eval_stats['acc1']:.1f}%")
                 max_accuracy = max(max_accuracy, eval_stats["acc1"])
                 val_loss = eval_stats['loss']
-                print(f'[INFO] Current max validation accuracy: {max_accuracy:.2f}%')
+                accelerator.print(f'[INFO] Current max validation accuracy: {max_accuracy:.2f}%')
                 
                 # save best model based on validation loss
                 if val_loss < max_loss:
-                    print(f'[INFO] Validation loss improved from {max_loss:.5f} to {val_loss:.5f}. Saving best model.')
+                    accelerator.print(f'[INFO] Validation loss improved from {max_loss:.5f} to {val_loss:.5f}. Saving best model.')
                     max_loss = val_loss
                     
                     try:
                         save_dir = Path(args.output_dir) / "best_model"
                         accelerator.save_state(save_dir)
-                        accelerator.print(f"Best model saved to {save_dir}")
+                        accelerator.print(f"[INFO] Best model saved to {save_dir}")
 
                     except Exception as e:
                         accelerator.print(f"Warning: Failed to save best model: {e}")
@@ -348,32 +348,33 @@ def main(args: argparse.Namespace) -> None:
                             f.write(json.dumps(log_stats) + "\n")
                     
                     except IOError as e:
-                        print(f"Warning: Failed to write log file: {e}\n")
+                        accelerator.print(f"Warning: Failed to write log file: {e}\n")
                 
                 # wandb logging
                 try:
                     accelerator.log(
                         {
-                            'Training loss': train_stats['loss'],
-                            'Training learning rate': train_stats['lr'],
-                            'Evaluation loss': eval_stats['loss'],
-                            'Evaluation top-1 accuracy': eval_stats['acc1'],
-                            'Max accuracy': max_accuracy
-                        }, step=epoch+1
+                            'train/loss': train_stats['loss'],
+                            'train/learning_rate': train_stats['lr'],
+                            'eval/loss': eval_stats['loss'],
+                            'eval/acc1': eval_stats['acc1'],
+                            'eval/max_accuracy': max_accuracy,
+                            'epoch': epoch
+                        }, step=epoch + 1
                     )
                 
                 except Exception as e:
-                    print(f"Warning: Failed to log to WandB: {e}\n")
+                    accelerator.print(f"Warning: Failed to log to WandB: {e}\n")
                         
-                # check early stopping with distributed synchronization
-                should_stop = es(val_loss, accelerator)
-                if should_stop:
-                    print(f'[INFO] Early stopping triggered at epoch {epoch+1}\n')
-                    # sync is already handled by DistributedEarlyStopping
-                    break
+            # check early stopping
+            should_stop = es(eval_stats['loss'], accelerator)
+
+            if should_stop:
+                accelerator.print(f"[INFO] Early stopping triggered at epoch {epoch}\n")
+                break
                 
     except KeyboardInterrupt:
-        print("\n[INFO] Training interrupted by user")
+        accelerator.print("\n[INFO] Training interrupted by user")
         
     except Exception as e:
         raise RuntimeError(f"Training failed: {e}")
@@ -383,14 +384,14 @@ def main(args: argparse.Namespace) -> None:
         total_time_str = str(datetime.timedelta(seconds=int(total_time)))
         
         if accelerator.is_main_process:
-            print(f'Training completed in {total_time_str}')
-            print(f'Best validation accuracy: {max_accuracy:.2f}% \n')
+            accelerator.print(f'[INFO] Training completed in {total_time_str}')
+            accelerator.print(f'[INFO] Best validation accuracy: {max_accuracy:.2f}% \n')
 
             try:
                 accelerator.end_training()
             
             except Exception as e:
-                print(f"Warning: Failed to properly end WandB tracking: {e}")
+                accelerator.print(f"Warning: Failed to properly end WandB tracking: {e}")
     
 if __name__ == '__main__': 
     

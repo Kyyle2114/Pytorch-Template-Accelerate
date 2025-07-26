@@ -4,6 +4,7 @@ import numpy as np
 from typing import Any, Dict, List
 
 import torch
+from accelerate.utils import reduce
 
 def seed_everything(seed: int = 21) -> None:
     """
@@ -225,46 +226,59 @@ class DistributedEarlyStopping:
         
     def __call__(self, score: float, accelerator) -> bool:
         """
-        Check if early stopping should be triggered.
+        Check if early stopping should be triggered with distributed synchronization.
         
         Args:
             score (float): Current validation score (should be globally averaged)
             accelerator: Accelerator instance for distributed operations
             
         Returns:
-            bool: True if early stopping should be triggered
+            bool: True if early stopping should be triggered (synchronized across all processes)
         """
-        # check for improvement based on mode
-        if self.mode == 'min':
-            if score < (self.best_score - self.delta):
-                self.counter = 0
-                self.best_score = score
-                if self.verbose and accelerator.is_main_process:
-                    print(f'[EarlyStopping] (Update) Best Score: {self.best_score:.5f}\n')
-            else:
-                self.counter += 1
-                if self.verbose and accelerator.is_main_process:
-                    print(f'[EarlyStopping] (Patience) {self.counter}/{self.patience}, ' \
-                          f'Best: {self.best_score:.5f}, Current: {score:.5f}, ' \
-                          f'Delta: {np.abs(self.best_score - score):.5f}\n')
-                
-        elif self.mode == 'max':
-            if score > (self.best_score + self.delta):
-                self.counter = 0
-                self.best_score = score
-                if self.verbose and accelerator.is_main_process:
-                    print(f'[EarlyStopping] (Update) Best Score: {self.best_score:.5f}\n')
-            else:
-                self.counter += 1
-                if self.verbose and accelerator.is_main_process:
-                    print(f'[EarlyStopping] (Patience) {self.counter}/{self.patience}, ' \
-                          f'Best: {self.best_score:.5f}, Current: {score:.5f}, ' \
-                          f'Delta: {np.abs(self.best_score - score):.5f}\n')
-                
-        # check if patience exceeded
-        if self.counter >= self.patience:
-            self.early_stop = True
-            if self.verbose and accelerator.is_main_process:
-                print(f'[EarlyStop Triggered] Best Score: {self.best_score:.5f}\n')
-        
-        return self.early_stop
+        # Only main process updates counters to avoid race conditions
+        if accelerator.is_main_process:
+            if self.mode == 'min':
+                if score < (self.best_score - self.delta):
+                    self.counter = 0
+                    self.best_score = score
+                    if self.verbose:
+                        accelerator.print(f'[EarlyStopping] (Update) Best Score: {self.best_score:.5f}\n')
+                else:
+                    self.counter += 1
+                    if self.verbose:
+                        msg = (
+                            f'[EarlyStopping] (Patience) {self.counter}/{self.patience}, '
+                            f'Best: {self.best_score:.5f}, Current: {score:.5f}, '
+                            f'Delta: {np.abs(self.best_score - score):.5f}\n'
+                        )
+                        accelerator.print(msg)
+
+            elif self.mode == 'max':
+                if score > (self.best_score + self.delta):
+                    self.counter = 0
+                    self.best_score = score
+                    if self.verbose:
+                        accelerator.print(f'[EarlyStopping] (Update) Best Score: {self.best_score:.5f}\n')
+                else:
+                    self.counter += 1
+                    if self.verbose:
+                        msg = (
+                            f'[EarlyStopping] (Patience) {self.counter}/{self.patience}, '
+                            f'Best: {self.best_score:.5f}, Current: {score:.5f}, '
+                            f'Delta: {np.abs(self.best_score - score):.5f}\n'
+                        )
+                        accelerator.print(msg)
+
+            # check patience only on main
+            if self.counter >= self.patience:
+                self.early_stop = True
+                if self.verbose:
+                    accelerator.print(f'[EarlyStop Triggered] Best Score: {self.best_score:.5f}')
+
+        # broadcast decision from main to all ranks
+        stop_tensor = torch.tensor(1 if (accelerator.is_main_process and self.early_stop) else 0, device=accelerator.device)
+        stop_tensor = reduce(stop_tensor, reduction="max")
+        global_stop = stop_tensor.item() == 1
+        # ensure all ranks share same flag locally
+        self.early_stop = global_stop
+        return global_stop
