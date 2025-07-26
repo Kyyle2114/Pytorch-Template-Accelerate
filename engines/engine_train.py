@@ -141,7 +141,7 @@ def train_one_epoch(
         if accelerator.is_main_process:
             print(f"Training Epoch {epoch} - "
                   f"Loss: {avg_stats.get('loss', 0.0):.4f}, "
-                  f"LR: {avg_stats['lr']:.6f}")
+                  f"Learning Rate: {avg_stats['lr']:.6f} \n")
         
         return avg_stats
         
@@ -245,7 +245,7 @@ def evaluate(
         avg_stats = metrics_tracker.compute_epoch_averages(accelerator)
 
         if accelerator.is_main_process:
-            print(f'* Acc@1 {avg_stats.get("acc1", 0.0):.3f} Acc@5 {avg_stats.get("acc5", 0.0):.3f} loss {avg_stats.get("loss", 0.0):.3f}')
+            print(f'* Acc@1 {avg_stats.get("acc1", 0.0):.3f} Acc@5 {avg_stats.get("acc5", 0.0):.3f} loss {avg_stats.get("loss", 0.0):.3f} \n')
             
         return avg_stats
         

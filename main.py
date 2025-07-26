@@ -297,7 +297,7 @@ def main(args: argparse.Namespace) -> None:
                     if accelerator.is_main_process:
                         save_dir = Path(args.output_dir) / f"checkpoint-{epoch}"
                         accelerator.save_state(save_dir)
-                        accelerator.print(f"Periodic checkpoint saved to {save_dir}")
+                        accelerator.print(f"Periodic checkpoint saved to {save_dir} \n")
                     
                 except Exception as e:
                     accelerator.print(f"Warning: Failed to save periodic checkpoint: {e}")
@@ -379,32 +379,34 @@ def main(args: argparse.Namespace) -> None:
         raise RuntimeError(f"Training failed: {e}")
     
     finally:
-        pass  # Python's automatic garbage collection is sufficient
-    
-    total_time = time.time() - start_time
-    total_time_str = str(datetime.timedelta(seconds=int(total_time)))
-    print(f'Training completed in {total_time_str}')
-    print(f'Best validation accuracy: {max_accuracy:.2f}%')
-    
-    # end wandb tracking
-    if accelerator.is_main_process:
-        try:
-            accelerator.end_training()
+        total_time = time.time() - start_time
+        total_time_str = str(datetime.timedelta(seconds=int(total_time)))
         
-        except Exception as e:
-            print(f"Warning: Failed to properly end WandB tracking: {e}")
-    
+        if accelerator.is_main_process:
+            print(f'Training completed in {total_time_str}')
+            print(f'Best validation accuracy: {max_accuracy:.2f}% \n')
+
+            try:
+                accelerator.end_training()
+            
+            except Exception as e:
+                print(f"Warning: Failed to properly end WandB tracking: {e}")
     
 if __name__ == '__main__': 
     
     parser = argparse.ArgumentParser('Model-Training', parents=[get_args_parser()])
     args = parser.parse_args() 
     
+    # check if this is the main process (LOCAL_RANK=0 or not set in single GPU)
+    is_main_process = int(os.environ.get('LOCAL_RANK', 0)) == 0
+    
     try:
         main(args)
-        print('\n=== Training Complete ===\n')
+        if is_main_process:
+            print('\n=== Training Complete ===\n')
     
     except Exception as e:
-        print(f'\n=== Training Failed ===')
-        print(f'Error: {e}\n')
+        if is_main_process:
+            print(f'\n=== Training Failed ===\n')
+            print(f'Error: {e}\n')
         raise

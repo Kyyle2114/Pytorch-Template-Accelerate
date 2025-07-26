@@ -150,10 +150,15 @@ class MetricTracker:
                     torch.tensor(local_data, device=accelerator.device, dtype=torch.float32)
                 )
                 
-                # reshape and compute averages
-                num_processes = gathered_data.shape[0]
+                # fix: gather_for_metrics concatenates all process data in first dimension
+                # gathered_data shape: [num_processes * len(local_data)]
+                # we need to reshape to [num_processes, len(local_data)]
                 num_metrics = len(metric_keys)
-                gathered_data = gathered_data.view(num_processes, num_metrics * 2)
+                data_per_process = num_metrics * 2  # each metric has [sum, count]
+                num_processes = gathered_data.shape[0] // data_per_process
+                
+                # reshape to [num_processes, data_per_process]
+                gathered_data = gathered_data.view(num_processes, data_per_process)
                 
                 for i, key in enumerate(metric_keys):
                     sum_idx = i * 2
@@ -188,7 +193,8 @@ class MetricTracker:
 
 class DistributedEarlyStopping:
     """
-    Early stopping that properly synchronizes across distributed processes.
+    Early stopping for distributed training based on the simple EarlyStopping class.
+    Since validation scores are globally averaged, all processes make the same decision.
     """
     def __init__(self, patience: int = 10, delta: float = 0.0, 
                  mode: str = 'min', verbose: bool = True) -> None:
@@ -212,66 +218,53 @@ class DistributedEarlyStopping:
         self.verbose = verbose
         self.counter = 0
         
+        # initialize best score properly for the given mode
         self.best_score = np.inf if mode == 'min' else -np.inf
         self.mode = mode
         self.delta = delta
         
     def __call__(self, score: float, accelerator) -> bool:
         """
-        Check if early stopping should be triggered with distributed synchronization.
+        Check if early stopping should be triggered.
         
         Args:
-            score (float): Current validation score 
+            score (float): Current validation score (should be globally averaged)
             accelerator: Accelerator instance for distributed operations
             
         Returns:
             bool: True if early stopping should be triggered
         """
-        # since validation score is already globally averaged, 
-        # all processes can make the same decision without communication
-        if self.best_score is None:
-            self.best_score = score
-            self.counter = 0
-            
-        elif self.mode == 'min':
+        # check for improvement based on mode
+        if self.mode == 'min':
             if score < (self.best_score - self.delta):
                 self.counter = 0
                 self.best_score = score
                 if self.verbose and accelerator.is_main_process:
-                    print(f'[EarlyStopping] (Update) Best Score: {self.best_score:.5f} \n')
+                    print(f'[EarlyStopping] (Update) Best Score: {self.best_score:.5f}\n')
             else:
                 self.counter += 1
                 if self.verbose and accelerator.is_main_process:
                     print(f'[EarlyStopping] (Patience) {self.counter}/{self.patience}, ' \
-                          f'Best: {self.best_score:.5f}' \
-                          f', Current: {score:.5f}, Delta: {np.abs(self.best_score - score):.5f} \n')
-            
+                          f'Best: {self.best_score:.5f}, Current: {score:.5f}, ' \
+                          f'Delta: {np.abs(self.best_score - score):.5f}\n')
+                
         elif self.mode == 'max':
             if score > (self.best_score + self.delta):
                 self.counter = 0
                 self.best_score = score
                 if self.verbose and accelerator.is_main_process:
-                    print(f'[EarlyStopping] (Update) Best Score: {self.best_score:.5f} \n')
+                    print(f'[EarlyStopping] (Update) Best Score: {self.best_score:.5f}\n')
             else:
                 self.counter += 1
                 if self.verbose and accelerator.is_main_process:
                     print(f'[EarlyStopping] (Patience) {self.counter}/{self.patience}, ' \
-                          f'Best: {self.best_score:.5f}' \
-                          f', Current: {score:.5f}, Delta: {np.abs(self.best_score - score):.5f} \n')
-            
-        self.early_stop = self.counter >= self.patience
-        
-        # ensure all processes make the same early stopping decision
-        if accelerator.use_distributed:
-            early_stop_tensor = torch.tensor([1 if self.early_stop else 0], 
-                                           device=accelerator.device, dtype=torch.int)
-            gathered_decisions = accelerator.gather_for_metrics(early_stop_tensor)
-            # if any process decides to stop, all should stop
-            should_stop = gathered_decisions.sum().item() > 0
-            self.early_stop = should_stop
-        
-        # print early stop triggered message
-        if self.early_stop and self.verbose and accelerator.is_main_process:
-            print(f'[EarlyStop Triggered] Best Score: {self.best_score:.5f} \n')
+                          f'Best: {self.best_score:.5f}, Current: {score:.5f}, ' \
+                          f'Delta: {np.abs(self.best_score - score):.5f}\n')
+                
+        # check if patience exceeded
+        if self.counter >= self.patience:
+            self.early_stop = True
+            if self.verbose and accelerator.is_main_process:
+                print(f'[EarlyStop Triggered] Best Score: {self.best_score:.5f}\n')
         
         return self.early_stop
