@@ -10,9 +10,9 @@ class CosineAnnealingWarmUpRestarts(_LRScheduler):
     Cosine Annealing with Warm Restarts and Warm Up scheduler.
     
     This scheduler implements a combination of:
-    - Linear warm-up for the first T_up epochs
-    - Cosine annealing for the remaining epochs
-    - Restarts capability with optional cycle length multiplier
+    - Linear warm-up for the first T_up iterations.
+    - Cosine annealing for the remaining iterations.
+    - Restarts capability with optional cycle length multiplier.
     """
     def __init__(self, optimizer: Optimizer, T_0: int, T_mult: int = 1, 
                  eta_max: float = 0.1, T_up: int = 0, gamma: float = 1., 
@@ -21,25 +21,26 @@ class CosineAnnealingWarmUpRestarts(_LRScheduler):
         Initialize the Cosine Annealing with Warm Restarts scheduler.
         
         Args:
-            optimizer (Optimizer): Wrapped optimizer
-            T_0 (int): First restart epoch number (must be positive)
-            T_mult (int): Factor to increase T_i after a restart (must be >= 1)
-            eta_max (float): Maximum learning rate
-            T_up (int): Linear warmup epoch number (must be non-negative)
-            gamma (float): Decrease rate of max learning rate by cycle
-            last_epoch (int): The index of last epoch
+            optimizer (Optimizer): Wrapped optimizer.
+            T_0 (int): Number of iterations for the first restart (can be steps or epochs).
+            T_mult (int): Factor to increase T_i after a restart (must be >= 1).
+            eta_max (float): Maximum learning rate.
+            T_up (int): Number of iterations for linear warm-up (can be steps or epochs).
+            gamma (float): Decrease rate of max learning rate by cycle.
+            last_epoch (int): The index of last iteration.
             
         Raises:
-            ValueError: If T_0 <= 0, T_mult < 1, T_up < 0, or eta_max <= 0
+            ValueError: If T_0 <= 0, T_mult < 1, T_up < 0, or eta_max <= 0.
             
         Example:
             >>> optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
             >>> scheduler = CosineAnnealingWarmUpRestarts(
-            ...     optimizer, T_0=10, T_mult=2, eta_max=0.1, T_up=2
+            ...     optimizer, T_0=150, T_mult=1, eta_max=0.1, T_up=10
             ... )
-            >>> for epoch in range(100):
-            ...     scheduler.step()
-            ...     train(...)
+            >>> for _ in range(num_epochs):
+            ...     for _ in range(num_steps_per_epoch):
+            ...         scheduler.step()
+            ...         train(...)
             ...     validate(...)
         """
         if T_0 <= 0 or not isinstance(T_0, int):
@@ -89,13 +90,13 @@ class CosineAnnealingWarmUpRestarts(_LRScheduler):
 
     def step(self, epoch: Union[int, None] = None) -> None:
         """
-        Update learning rates according to the schedule.
+        Update learning rates. This should be called after every batch update.
         
         Args:
-            epoch (Union[int, None]): Current epoch number. If None, uses internal counter.
+            epoch (Union[int, None]): Not used, only for compatibility. Set to None.
             
         Raises:
-            ValueError: If epoch is negative
+            ValueError: If epoch is negative.
         """
         if epoch is None:
             epoch = self.last_epoch + 1

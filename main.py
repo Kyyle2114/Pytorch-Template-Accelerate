@@ -1,4 +1,5 @@
 import os
+import math
 import argparse
 import torchinfo
 import time
@@ -228,13 +229,19 @@ def main(args: argparse.Namespace) -> None:
         print('Optimizer:')
         print(optimizer, '\n')
     
+    # calculate total number of steps for the scheduler
+    num_update_steps_per_epoch = math.ceil(len(train_loader) / args.accum_iter)
+    args.num_training_steps = args.epoch * num_update_steps_per_epoch
+    args.num_warmup_steps = args.warmup_epochs * num_update_steps_per_epoch
+    
     try:
+        # use per-step lr scheduler
         scheduler = lr_sched.CosineAnnealingWarmUpRestarts(
             optimizer, 
-            T_0=args.epoch, 
+            T_0=args.num_training_steps, 
             T_mult=1, 
             eta_max=args.abs_lr, 
-            T_up=args.warmup_epochs, 
+            T_up=args.num_warmup_steps, 
             gamma=1.0
         )
     
@@ -271,7 +278,7 @@ def main(args: argparse.Namespace) -> None:
     max_loss = np.inf   # for evaluation 
     
     # early stopping: lower is better ('min' mode)
-    es = misc.DistributedEarlyStopping(patience=args.patience, delta=0.5, mode='min', verbose=True) #0.5 for test
+    es = misc.DistributedEarlyStopping(patience=args.patience, delta=0.0, mode='min', verbose=True)
     
     # initialize reusable metrics tracker for training
     metrics_tracker = misc.MetricTracker()
@@ -285,6 +292,7 @@ def main(args: argparse.Namespace) -> None:
                 data_loader=train_loader,
                 criterion=criterion,
                 optimizer=optimizer,
+                scheduler=scheduler,
                 accelerator=accelerator,
                 epoch=epoch,
                 args=args,
@@ -301,8 +309,6 @@ def main(args: argparse.Namespace) -> None:
                     
                 except Exception as e:
                     accelerator.print(f"Warning: Failed to save periodic checkpoint: {e}")
-                
-            scheduler.step()
                 
             # model evaluation (validation set)
             eval_stats = engine_train.evaluate(
@@ -360,7 +366,7 @@ def main(args: argparse.Namespace) -> None:
                             'eval/acc1': eval_stats['acc1'],
                             'eval/max_accuracy': max_accuracy,
                             'epoch': epoch
-                        }, step=epoch + 1
+                        }, step=epoch
                     )
                 
                 except Exception as e:

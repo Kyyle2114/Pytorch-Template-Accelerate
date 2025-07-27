@@ -4,6 +4,8 @@ from typing import Iterable, Dict, Any, Optional
 from timm.utils import accuracy
 from tqdm.auto import tqdm
 from accelerate import Accelerator
+from accelerate.optimizer import AcceleratedOptimizer
+from accelerate.scheduler import AcceleratedScheduler
 
 import torch
 
@@ -13,7 +15,8 @@ def train_one_epoch(
     model: torch.nn.Module,
     data_loader: Iterable, 
     criterion: torch.nn.Module,
-    optimizer: torch.optim.Optimizer,
+    optimizer: AcceleratedOptimizer,
+    scheduler: AcceleratedScheduler,
     accelerator: Accelerator, 
     epoch: int, 
     args: Optional[argparse.Namespace] = None,
@@ -26,7 +29,8 @@ def train_one_epoch(
         model: PyTorch model to train
         data_loader: PyTorch DataLoader for training data
         criterion: PyTorch loss function 
-        optimizer: PyTorch optimizer
+        optimizer: An `AcceleratedOptimizer` instance from `accelerator.prepare()`.
+        scheduler: An `AcceleratedScheduler` instance from `accelerator.prepare()`.
         accelerator: Accelerator object for distributed training
         epoch: Current epoch number
         args: Parsed arguments containing gradient clipping and batch size info
@@ -47,11 +51,14 @@ def train_one_epoch(
         # standard distributed training with reusable metrics tracker
         metrics_tracker = MetricTracker()
         for epoch in range(num_epochs):
+            # The optimizer and scheduler must be prepared by `accelerate`
+            prepared_optimizer, prepared_scheduler = accelerator.prepare(optimizer, scheduler)
             train_stats = train_one_epoch(
                 model=model,
                 data_loader=train_loader, 
                 criterion=criterion,
-                optimizer=optimizer,
+                optimizer=prepared_optimizer,
+                scheduler=prepared_scheduler,
                 accelerator=accelerator,
                 epoch=epoch,
                 args=args,
@@ -65,8 +72,10 @@ def train_one_epoch(
         raise TypeError(f"model must be a torch.nn.Module, got {type(model)}")
     if not isinstance(criterion, torch.nn.Module):
         raise TypeError(f"criterion must be a torch.nn.Module, got {type(criterion)}")
-    if not isinstance(optimizer, torch.optim.Optimizer):
-        raise TypeError(f"optimizer must be a torch.optim.Optimizer, got {type(optimizer)}")
+    if not isinstance(optimizer, AcceleratedOptimizer):
+        raise TypeError(f"optimizer must be an `accelerate.optimizer.AcceleratedOptimizer`, got {type(optimizer)}")
+    if not isinstance(scheduler, AcceleratedScheduler):
+        raise TypeError(f"scheduler must be an `accelerate.scheduler.AcceleratedScheduler`, got {type(scheduler)}")
     if not isinstance(accelerator, Accelerator):
         raise TypeError(f"accelerator must be an Accelerator, got {type(accelerator)}")
     if not isinstance(epoch, int):
@@ -118,6 +127,7 @@ def train_one_epoch(
                     accelerator.clip_grad_norm_(model.parameters(), args.clip_grad)
                 
                 optimizer.step()
+                scheduler.step()
                 optimizer.zero_grad()
                 
             # progress bar shows current local averages
