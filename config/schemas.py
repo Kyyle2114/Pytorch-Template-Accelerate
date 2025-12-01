@@ -64,7 +64,7 @@ class TrainingConfig(ConfigBase):
     """Training configuration settings."""
     
     epoch: int = Field(
-        default=10,
+        default=100,
         description="Total number of training epochs",
         ge=1
     )

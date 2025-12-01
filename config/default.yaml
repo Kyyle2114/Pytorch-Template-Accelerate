@@ -4,7 +4,7 @@
 
 # --- General Configuration ---
 general:
-  seed: 21
+  seed: 42
   output_dir: ./output_dir
 
 # --- Data Configuration ---
@@ -15,7 +15,7 @@ data:
 
 # --- Training Configuration ---
 training:
-  epoch: 10
+  epoch: 100
   patience: 50
   lr: 1e-3
   weight_decay: 1e-4

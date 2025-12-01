@@ -171,7 +171,7 @@ def evaluate(
             loss = criterion(outputs, targets)
             
             # accuracy calculation - returns percentages
-            acc1 = accuracy(outputs, targets)
+            acc1, _ = accuracy(outputs, targets, topk=(1, 5))
             
             # update metrics tracker with batch results
             metrics_tracker.update({

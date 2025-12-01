@@ -79,7 +79,7 @@ def main(args: argparse.Namespace) -> None:
         # print config help and exit
         if args.help_config:
             misc.print_config_help(config)
-            return
+            exit(0)
             
     except Exception as e:
         raise RuntimeError(f"Failed to load config: {e}")

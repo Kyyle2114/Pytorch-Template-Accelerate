@@ -11,14 +11,6 @@ print_info() {
     echo -e "\033[1;34m[INFO]\033[0m $1"
 }
 
-print_error() {
-    echo -e "\033[1;31m[ERROR]\033[0m $1"
-}
-
-print_success() {
-    echo -e "\033[1;32m[SUCCESS]\033[0m $1"
-}
-
 # Automatically determine the number of GPUs
 if [ -n "$CUDA_VISIBLE_DEVICES" ]; then
     N_GPUS=$(echo $CUDA_VISIBLE_DEVICES | tr ',' '\n' | wc -l)
@@ -35,10 +27,7 @@ CONFIG_FILE="config/default.yaml"
 print_info "Starting training with config: ${CONFIG_FILE}"
 print_info "GPUs: $CUDA_VISIBLE_DEVICES (${N_GPUS} processes)"
 
-accelerate launch --num_processes=$N_GPUS main.py \
-    --config "${CONFIG_FILE}" || {
-    print_error "Training failed!"
-    exit 1
-}
+accelerate launch --num_processes=$N_GPUS --main_process_port 0 main.py \
+    --config "${CONFIG_FILE}"
 
-print_success "Training completed successfully!"
+print_info "Training completed successfully!"
