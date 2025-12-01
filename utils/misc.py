@@ -16,20 +16,20 @@ from config.schemas import (
     WandBConfig
 )
 
-def seed_everything(seed: int = 21) -> None:
+def seed_everything(seed: int = 42) -> None:
     """
     Set random seeds for reproducibility.
     
     Args:
-        seed (int): Random seed value. Defaults to 21.
+        seed (int): Random seed value. Defaults to 42.
     """
     random.seed(seed)
     np.random.seed(seed) 
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
     os.environ["PYTHONHASHSEED"] = str(seed)
-    # torch.use_deterministic_algorithms(True)
 
 
 def seed_worker(_worker_id: int) -> None:
