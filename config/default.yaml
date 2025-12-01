@@ -1,0 +1,30 @@
+# ======================================================================
+# Default Training Configuration
+# ======================================================================
+
+# --- General Configuration ---
+general:
+  seed: 21
+  output_dir: ./output_dir
+
+# --- Data Configuration ---
+data:
+  dataset_path: ./dataset
+  batch_size: 16
+  num_workers: 4
+
+# --- Training Configuration ---
+training:
+  epoch: 10
+  patience: 50
+  lr: 1e-3
+  weight_decay: 1e-4
+  accum_iter: 1
+  warmup_epochs: 10
+  clip_grad: null   # null for no gradient clipping
+
+# --- WandB Configuration ---
+wandb:
+  project_name: Model-Training
+  run_name: Model-Training
+

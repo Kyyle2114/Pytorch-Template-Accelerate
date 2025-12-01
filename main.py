@@ -5,7 +5,7 @@ import torchinfo
 import time
 import datetime
 import json
-import numpy as np
+import yaml
 from pathlib import Path
 from accelerate import Accelerator
 import warnings
@@ -17,97 +17,86 @@ import torch.nn as nn
 import torchvision.transforms as T
 from torch.utils.data import DataLoader
 
+from config.schemas import Config
 from utils import misc, datasets, lr_sched
 from engines import engine_train
 from models import cnn
 
+
 def get_args_parser() -> argparse.ArgumentParser:
     """
     Create and return argument parser for training configuration.
+    
+    All configuration is handled through the YAML config file.
+    Override config values with --set KEY=VALUE
     
     Returns:
         argparse.ArgumentParser: Configured argument parser
     """
     parser = argparse.ArgumentParser(add_help=False)
     
-    # --- Initial config ---
-    parser.add_argument('--seed', type=int, default=21, 
-                        help='random seed for reproducibility')
+    # --- Config file path ---
+    parser.add_argument(
+        '-c', '--config', 
+        type=str, 
+        default='config/default.yaml',
+        help='path to YAML configuration file'
+    )
     
-    parser.add_argument('--output_dir', default='./output_dir',
-                        help='path where to save checkpoints and logs')
+    # --- Show help for config ---
+    parser.add_argument(
+        '--help_config', 
+        action='store_true',
+        help='show detailed help for configuration parameters'
+    )
     
-    # --- Training config ---
-    parser.add_argument('--dataset_path', type=str, default='./dataset', 
-                        help='dataset root path')
-    
-    parser.add_argument('--batch_size', type=int, default=16, 
-                        help='batch size per GPU')
-    
-    parser.add_argument('--epoch', type=int, default=10, 
-                        help='total number of training epochs')
-    
-    parser.add_argument('--patience', type=int, default=50, 
-                        help='patience for early stopping')
-    
-    parser.add_argument('--num_workers', type=int, default=4,
-                        help='number of data loading workers')
-    
-    # --- Optimizer config ---
-    parser.add_argument('--lr', type=float, default=1e-3, 
-                        help='base learning rate')
-    
-    parser.add_argument('--weight_decay', type=float, default=1e-4, 
-                        help='weight decay for optimizer')
-    
-    parser.add_argument('--accum_iter', default=1, type=int,
-                        help='gradient accumulation steps to increase effective batch size')
-    
-    parser.add_argument('--warmup_epochs', type=int, default=10,
-                        help='number of warmup epochs for learning rate scheduler')
-    
-    parser.add_argument('--clip_grad', type=float, default=None,
-                        help='gradient clipping norm (None for no clipping)')
-    
-    # --- WandB config ---
-    parser.add_argument('--project_name', type=str, default='Model-Training', 
-                        help='WandB project name')
-    
-    parser.add_argument('--run_name', type=str, default='Model-Training', 
-                        help='WandB run name')
+    # --- Override config values ---
+    parser.add_argument(
+        '--set', 
+        action='append', 
+        nargs='+', 
+        metavar='KEY=VALUE',
+        help='override any config value (e.g., --set general.seed=42 --set training.lr=0.001)'
+    )
     
     return parser
 
 
 def main(args: argparse.Namespace) -> None:
     """
-    Main function for model training with Accelerate.
+    Main function for model training.
 
     Args:
-        args (argparse.Namespace): Parsed command line arguments
-        
-    Raises:
-        RuntimeError: If training encounters unrecoverable errors
-        ValueError: If invalid arguments are provided
+        args: Parsed command line arguments containing:
+            - config: Path to YAML configuration file
+            - set: Optional config overrides in KEY=VALUE format
+            - help_config: Show config help and exit
     """
-    # --- Input validation ---
-    if args.epoch <= 0:
-        raise ValueError(f"Number of epochs must be positive, got {args.epoch}\n")
-    if args.batch_size <= 0:
-        raise ValueError(f"Batch size must be positive, got {args.batch_size}\n")
-    if args.lr <= 0:
-        raise ValueError(f"Learning rate must be positive, got {args.lr}\n")
+    # --- Load configuration ---
+    try:
+        config: Config = misc.load_config(args.config, args)
+        
+        # print config help and exit
+        if args.help_config:
+            misc.print_config_help(config)
+            return
+            
+    except Exception as e:
+        raise RuntimeError(f"Failed to load config: {e}")
+    
+    # --- Seed & Output setup ---
+    misc.seed_everything(config.general.seed)
+    
+    output_path = Path(config.general.output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
     
     # --- Accelerate & WandB setting ---
-    misc.seed_everything(args.seed)
-    
-    # initialize accelerator
     try:
         accelerator = Accelerator(
-            gradient_accumulation_steps=args.accum_iter,
+            gradient_accumulation_steps=config.training.accum_iter,
             mixed_precision='fp16',
             log_with='wandb',
-            project_dir=args.output_dir
+            project_dir=str(output_path)
         )
         
     except Exception as e:
@@ -117,34 +106,27 @@ def main(args: argparse.Namespace) -> None:
     if accelerator.is_main_process:
         try:
             accelerator.init_trackers(
-                project_name=args.project_name,
-                config=vars(args),
-                init_kwargs={"wandb": {"name": args.run_name}}
+                project_name=config.wandb.project_name,
+                config=config.model_dump(),
+                init_kwargs={"wandb": {"name": config.wandb.run_name}}
             )
             
         except Exception as e:
-            print(f"Warning: Failed to initialize WandB tracking: {e}")
-            print("Continuing without WandB logging...")
+            accelerator.print(f"Warning: Failed to initialize WandB tracking: {e}")
+            accelerator.print("Continuing without WandB logging...")
     
     if accelerator.is_main_process:
-        print('\njob dir: {}'.format(os.path.dirname(os.path.realpath(__file__))))
-        print('args: ', args, '\n')
+        accelerator.print('\njob dir: {}'.format(os.path.dirname(os.path.realpath(__file__))))
+        accelerator.print(f'config: {args.config}\n')
         
-        # ensure output directory exists
-        output_path = Path(args.output_dir)
-        output_path.mkdir(parents=True, exist_ok=True)
-        
-        # save args as JSON file with timestamp
-        args_dict = vars(args)
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        args_file_path = output_path / f'args_{timestamp}.json'
-        
+        # save config as YAML file
+        config_file = output_path / 'config.yaml'
         try:
-            with open(args_file_path, mode="w", encoding="utf-8") as f:
-                json.dump(args_dict, f, indent=4)
+            with open(config_file, mode="w", encoding="utf-8") as f:
+                yaml.dump(config.model_dump(), f, indent=4, sort_keys=False)
         
         except IOError as e:
-            print(f"Warning: Failed to save arguments to file: {e}\n")
+            accelerator.print(f"Warning: Failed to save config to file: {e}\n")
     
     # --- Dataset & Dataloader ---
     transform = T.Compose([
@@ -155,13 +137,13 @@ def main(args: argparse.Namespace) -> None:
     # CIFAR10 for testing
     try:
         train_set = datasets.make_cifar10_dataset(
-            dataset_path=args.dataset_path,
+            dataset_path=config.data.dataset_path,
             train=True,
             transform=transform
         )
 
         val_set = datasets.make_cifar10_dataset(
-            dataset_path=args.dataset_path,
+            dataset_path=config.data.dataset_path,
             train=False,
             transform=transform
         )
@@ -170,27 +152,28 @@ def main(args: argparse.Namespace) -> None:
         raise RuntimeError(f"Failed to create datasets: {e}\n")
     
     try:
+        num_workers = config.data.num_workers
         train_loader = DataLoader(
             train_set, 
-            batch_size=args.batch_size, 
+            batch_size=config.data.batch_size, 
             shuffle=True, 
-            num_workers=args.num_workers,
+            num_workers=num_workers,
             pin_memory=True,
             drop_last=True,
             worker_init_fn=misc.seed_worker,
-            persistent_workers=True if args.num_workers > 0 else False,
-            prefetch_factor=2 if args.num_workers > 0 else None
+            persistent_workers=True if num_workers > 0 else False,
+            prefetch_factor=2 if num_workers > 0 else None
         )
         
         val_loader = DataLoader(
             val_set, 
-            batch_size=args.batch_size, 
+            batch_size=config.data.batch_size, 
             shuffle=False, 
-            num_workers=args.num_workers,
+            num_workers=num_workers,
             pin_memory=True,
             drop_last=False,
-            persistent_workers=True if args.num_workers > 0 else False,
-            prefetch_factor=2 if args.num_workers > 0 else None
+            persistent_workers=True if num_workers > 0 else False,
+            prefetch_factor=2 if num_workers > 0 else None
         )
     
     except Exception as e:
@@ -206,42 +189,38 @@ def main(args: argparse.Namespace) -> None:
     
     # print model info 
     if accelerator.is_main_process:
-        print()
-        print('=== MODEL INFO ===')
+        accelerator.print()
+        accelerator.print('=== MODEL INFO ===')
         torchinfo.summary(model)
-        print()    
+        accelerator.print()    
 
     # --- Training config (loss, optimizer, scheduler) ---
     criterion = nn.CrossEntropyLoss()
 
-    eff_batch_size = args.batch_size * args.accum_iter * accelerator.num_processes
-    args.abs_lr = args.lr * eff_batch_size / 256
+    eff_batch_size = config.data.batch_size * config.training.accum_iter * accelerator.num_processes
+    abs_lr = config.training.lr * eff_batch_size / 256
     
     # following timm: set wd as 0 for bias and norm layers
-    param_groups = misc.add_weight_decay(model, args.weight_decay)
+    param_groups = misc.add_weight_decay(model, config.training.weight_decay)
     
     optimizer = torch.optim.AdamW(
         param_groups, 
-        lr=1e-7  # small lr for warm-up
+        lr=0.0  # small lr for warm-up
     )
     
-    if accelerator.is_main_process:
-        print('Optimizer:')
-        print(optimizer, '\n')
-    
     # calculate total number of steps for the scheduler
-    num_update_steps_per_epoch = math.ceil(len(train_loader) / args.accum_iter)
-    args.num_training_steps = args.epoch * num_update_steps_per_epoch
-    args.num_warmup_steps = args.warmup_epochs * num_update_steps_per_epoch
+    num_update_steps_per_epoch = math.ceil(len(train_loader) / config.training.accum_iter)
+    num_training_steps = config.training.epoch * num_update_steps_per_epoch
+    num_warmup_steps = config.training.warmup_epochs * num_update_steps_per_epoch
     
     try:
         # use per-step lr scheduler
         scheduler = lr_sched.CosineAnnealingWarmUpRestarts(
             optimizer, 
-            T_0=args.num_training_steps, 
+            T_0=num_training_steps, 
             T_mult=1, 
-            eta_max=args.abs_lr, 
-            T_up=args.num_warmup_steps, 
+            eta_max=abs_lr, 
+            T_up=num_warmup_steps, 
             gamma=1.0
         )
     
@@ -262,31 +241,38 @@ def main(args: argparse.Namespace) -> None:
         try:
             # log additional configurations to wandb through accelerator
             accelerator.log({
-                'config/batch_size_per_gpu': args.batch_size,
-                'config/gradient_accumulation_steps': args.accum_iter,
+                'config/batch_size_per_gpu': config.data.batch_size,
+                'config/gradient_accumulation_steps': config.training.accum_iter,
                 'config/num_processes': accelerator.num_processes,
                 'config/effective_batch_size': eff_batch_size,
                 'config/num_parameters': n_parameters
             }, step=0)
         
         except Exception as e:
-            print(f"Warning: Failed to log to WandB: {e}\n")
+            accelerator.print(f"Warning: Failed to log to WandB: {e}\n")
     
     # --- Model training ---
     start_time = time.time()
-    max_accuracy = 0.0  # for evaluation
-    max_loss = np.inf   # for evaluation 
+    max_accuracy = 0.0
+    min_loss = float('inf')
+    
+    # best model metrics
+    best_epoch = 0
+    best_acc1 = 0.0
     
     # early stopping: lower is better ('min' mode)
-    es = misc.DistributedEarlyStopping(patience=args.patience, delta=0.0, mode='min', verbose=True)
+    es = misc.DistributedEarlyStopping(
+        patience=config.training.patience, 
+        delta=0.0, 
+        mode='min', 
+        verbose=True
+    )
     
-    # initialize reusable metrics tracker for training
     metrics_tracker = misc.MetricTracker()
     
     # training loop
     try:
-        for epoch in range(args.epoch):
-            # model train with reusable metrics tracker
+        for epoch in range(config.training.epoch):
             train_stats = engine_train.train_one_epoch(
                 model=model, 
                 data_loader=train_loader,
@@ -295,43 +281,35 @@ def main(args: argparse.Namespace) -> None:
                 scheduler=scheduler,
                 accelerator=accelerator,
                 epoch=epoch,
-                args=args,
+                clip_grad=config.training.clip_grad,
                 metrics_tracker=metrics_tracker
             )
-            
-            # save model checkpoint periodically
-            if args.output_dir and (epoch % 20 == 0 or epoch + 1 == args.epoch):
-                try:
-                    if accelerator.is_main_process:
-                        save_dir = Path(args.output_dir) / f"checkpoint-{epoch}"
-                        accelerator.save_state(save_dir)
-                        accelerator.print(f"[INFO] Periodic checkpoint saved to {save_dir} \n")
-                    
-                except Exception as e:
-                    accelerator.print(f"Warning: Failed to save periodic checkpoint: {e}")
                 
             # model evaluation (validation set)
             eval_stats = engine_train.evaluate(
                 model=model,
                 data_loader=val_loader,
                 criterion=criterion,
-                accelerator=accelerator
+                accelerator=accelerator,
+                metrics_tracker=metrics_tracker
             )
             
-            # validation on main process
+            # update best validation metrics on main process
             if accelerator.is_main_process:
-                accelerator.print(f"[INFO] Accuracy of the network on the {len(val_set)} test images: {eval_stats['acc1']:.1f}%")
+                accelerator.print(f"[INFO] Accuracy of the network on the {len(val_set)} test images: {eval_stats['acc1']:.4f}%")
                 max_accuracy = max(max_accuracy, eval_stats["acc1"])
                 val_loss = eval_stats['loss']
-                accelerator.print(f'[INFO] Current max validation accuracy: {max_accuracy:.2f}%')
+                accelerator.print(f'[INFO] Current max validation accuracy: {max_accuracy:.4f}%')
                 
                 # save best model based on validation loss
-                if val_loss < max_loss:
-                    accelerator.print(f'[INFO] Validation loss improved from {max_loss:.5f} to {val_loss:.5f}. Saving best model.')
-                    max_loss = val_loss
+                if val_loss < min_loss:
+                    accelerator.print(f'[INFO] Validation loss improved from {min_loss:.5f} to {val_loss:.5f}. Saving best model.')
+                    min_loss = val_loss
+                    best_epoch = epoch
+                    best_acc1 = eval_stats['acc1']
                     
                     try:
-                        save_dir = Path(args.output_dir) / "best_model"
+                        save_dir = output_path / "best_model"
                         accelerator.save_state(save_dir)
                         accelerator.print(f"[INFO] Best model saved to {save_dir}")
 
@@ -339,7 +317,7 @@ def main(args: argparse.Namespace) -> None:
                         accelerator.print(f"Warning: Failed to save best model: {e}")
 
                 # stats logging to file
-                if args.output_dir:
+                if config.general.output_dir:
                     log_stats = {
                         **{f'train_{k}': v for k, v in train_stats.items()},
                         **{f'test_{k}': v for k, v in eval_stats.items()},
@@ -349,7 +327,7 @@ def main(args: argparse.Namespace) -> None:
                     }
                     
                     try:
-                        log_file_path = Path(args.output_dir) / "log.txt"
+                        log_file_path = output_path / "log.txt"
                         with open(log_file_path, mode="a", encoding="utf-8") as f:
                             f.write(json.dumps(log_stats) + "\n")
                     
@@ -386,19 +364,46 @@ def main(args: argparse.Namespace) -> None:
         raise RuntimeError(f"Training failed: {e}")
     
     finally:
+        # save last model
+        if accelerator.is_main_process:
+            try:
+                save_dir = output_path / "last_model"
+                accelerator.save_state(save_dir)
+                accelerator.print(f"[INFO] Last model saved to {save_dir}")
+            except Exception as e:
+                accelerator.print(f"Warning: Failed to save last model: {e}")
+        
+        # print final metrics
         total_time = time.time() - start_time
         total_time_str = str(datetime.timedelta(seconds=int(total_time)))
         
         if accelerator.is_main_process:
-            accelerator.print(f'[INFO] Training completed in {total_time_str}')
-            accelerator.print(f'[INFO] Best validation accuracy: {max_accuracy:.2f}% \n')
+            accelerator.print(f'\n[INFO] Training completed in {total_time_str}')
+            accelerator.print(f'[INFO] Best validation epoch: {best_epoch}')
+            accelerator.print(f'[INFO] Best validation loss: {min_loss:.5f}')
+            accelerator.print(f'[INFO] Best validation accuracy: {best_acc1:.4f}%')
+            accelerator.print(f'[INFO] Max validation accuracy: {max_accuracy:.4f}%\n')
+        
+        # log final metrics to wandb
+        try:
+            accelerator.log({
+                'final/best_loss': min_loss,
+                'final/best_epoch': best_epoch,
+                'final/best_acc1': best_acc1,
+                'final/max_accuracy': max_accuracy,
+                'final/training_time': total_time_str
+            })
+        except Exception as e:
+            accelerator.print(f"Warning: Failed to log final metrics: {e}")
 
+        # end training
+        if accelerator.is_main_process:
             try:
                 accelerator.end_training()
-            
             except Exception as e:
                 accelerator.print(f"Warning: Failed to properly end WandB tracking: {e}")
     
+
 if __name__ == '__main__': 
     
     parser = argparse.ArgumentParser('Model-Training', parents=[get_args_parser()])
@@ -416,4 +421,4 @@ if __name__ == '__main__':
         if is_main_process:
             print(f'\n=== Training Failed ===\n')
             print(f'Error: {e}\n')
-        raise
+        exit(1)

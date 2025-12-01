@@ -1,10 +1,20 @@
 import os 
 import random
+import argparse
+import yaml
 import numpy as np
-from typing import Any, Dict, List
+from typing import Any, Dict, List, get_origin, get_args, Union
 
 import torch
 from accelerate.utils import reduce
+
+from config.schemas import (
+    Config, 
+    GeneralConfig, 
+    DataConfig, 
+    TrainingConfig, 
+    WandBConfig
+)
 
 def seed_everything(seed: int = 21) -> None:
     """
@@ -173,7 +183,7 @@ class MetricTracker:
             except Exception as e:
                 # fallback to local averages if gathering fails
                 if accelerator.is_main_process:
-                    print(f"Warning: Failed to gather metrics, using local averages: {e}")
+                    accelerator.print(f"Warning: Failed to gather metrics, using local averages: {e}")
                 averages = self.running_metrics.copy()
         else:
             # single process - use local averages
@@ -282,3 +292,250 @@ class DistributedEarlyStopping:
         # ensure all ranks share same flag locally
         self.early_stop = global_stop
         return global_stop
+
+
+# --- Config Loading Functions ---
+
+def parse_key_value_pairs(set_args: List[List[str]] | None) -> Dict[str, Any]:
+    """
+    Parse --set key=value arguments into a nested dictionary.
+    
+    Args:
+        set_args: List of key=value strings from --set argument
+        
+    Returns:
+        dict: Parsed key-value pairs as nested dictionary
+        
+    Example:
+        ```python
+        # --set general.seed=42 training.lr=0.001
+        args = [['general.seed=42'], ['training.lr=0.001']]
+        result = parse_key_value_pairs(args)
+        # {'general': {'seed': 42}, 'training': {'lr': 0.001}}
+        ```
+        
+    Raises:
+        ValueError: If key=value format is invalid
+    """
+    overrides: Dict[str, Any] = {}
+    
+    if not set_args:
+        return overrides
+    
+    for arg_group in set_args:
+        for kv_pair in arg_group:
+            if '=' not in kv_pair:
+                raise ValueError(f"Invalid --set format: '{kv_pair}'. Expected KEY=VALUE")
+                
+            key_path, value = kv_pair.split('=', 1)
+            
+            # nested key path (e.g., "general.seed" -> ["general", "seed"])
+            keys = key_path.split('.')
+            
+            if not all(keys):
+                raise ValueError(f"Invalid key path: '{key_path}'. Empty key component")
+            
+            # type inference for value
+            parsed_value: Any
+            try:
+                if value.lower() in ('true', 'false'):
+                    parsed_value = value.lower() == 'true'
+                elif value.lower() == 'none':
+                    parsed_value = None
+                elif '.' in value and value.replace('.', '').replace('-', '').replace('e', '').replace('E', '').isdigit():
+                    parsed_value = float(value)
+                elif value.isdigit() or (value.startswith('-') and value[1:].isdigit()):
+                    parsed_value = int(value)
+                else:
+                    parsed_value = value
+            except (ValueError, AttributeError):
+                parsed_value = value
+            
+            # build nested dictionary
+            current = overrides
+            for key in keys[:-1]:
+                if key not in current:
+                    current[key] = {}
+                current = current[key]
+            
+            current[keys[-1]] = parsed_value
+    
+    return overrides
+
+
+def validate_config_keys(config: Dict[str, Any], overrides: Dict[str, Any]) -> None:
+    """
+    Validate that all keys in overrides exist in the config.
+    
+    Args:
+        config: Base configuration dictionary
+        overrides: Dictionary containing overrides to validate
+        
+    Raises:
+        ValueError: If any key in overrides doesn't exist in config
+    """
+    def check_nested_keys(base_dict: Dict[str, Any], override_dict: Dict[str, Any], path: str = "") -> None:
+        """Recursively check if all override keys exist in base config."""
+        for key, value in override_dict.items():
+            current_path = f"{path}.{key}" if path else key
+            
+            if key not in base_dict:
+                available_keys = list(base_dict.keys())
+                raise ValueError(
+                    f"Config key '{current_path}' does not exist. "
+                    f"Available keys at this level: {available_keys}"
+                )
+            
+            if isinstance(value, dict) and isinstance(base_dict[key], dict):
+                check_nested_keys(base_dict[key], value, current_path)
+    
+    check_nested_keys(config, overrides)
+
+
+def apply_cli_overrides(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]:
+    """
+    Apply CLI argument overrides to the loaded config.
+    
+    Args:
+        config: Loaded configuration dictionary
+        args: Parsed command line arguments (must have 'set' attribute)
+        
+    Returns:
+        dict: Updated configuration with CLI overrides
+        
+    Raises:
+        ValueError: If any --set key doesn't exist in config
+    """
+    # parse --set arguments
+    set_overrides = parse_key_value_pairs(getattr(args, 'set', None))
+    
+    # validate that all override keys exist in config
+    if set_overrides:
+        validate_config_keys(config, set_overrides)
+    
+    # apply overrides using deep update
+    def deep_update(base_dict: Dict[str, Any], update_dict: Dict[str, Any]) -> None:
+        """Recursively update nested dictionary."""
+        for key, value in update_dict.items():
+            if key in base_dict and isinstance(base_dict[key], dict) and isinstance(value, dict):
+                deep_update(base_dict[key], value)
+            else:
+                base_dict[key] = value
+    
+    deep_update(config, set_overrides)
+    
+    return config
+
+
+def load_config(config_path: str, args: argparse.Namespace | None = None) -> Config:
+    """
+    Load and validate config from YAML file with Pydantic.
+    
+    Supports CLI overrides via --set KEY=VALUE.
+    
+    Args:
+        config_path: Path to YAML configuration file
+        args: Optional parsed command line arguments for overrides
+        
+    Returns:
+        Config: Validated configuration object
+        
+    Raises:
+        FileNotFoundError: If config file doesn't exist
+        yaml.YAMLError: If YAML parsing fails
+        ValidationError: If config validation fails
+    """
+    # check if file exists
+    if not os.path.exists(config_path):
+        raise FileNotFoundError(f"Config file not found: {config_path}")
+    
+    # load yaml file
+    with open(config_path, encoding='utf-8') as f:
+        config_dict = yaml.safe_load(f)
+    
+    if config_dict is None:
+        config_dict = {}
+    
+    # apply CLI overrides if args provided
+    if args is not None:
+        config_dict = apply_cli_overrides(config_dict, args)
+    
+    # validate with pydantic
+    return Config(**config_dict)
+
+
+def print_config_help(config: Config) -> None:
+    """
+    Print formatted help for configuration parameters.
+    
+    Displays all config sections with their fields, types, defaults,
+    and current values.
+    
+    Args:
+        config: Configuration object to display help for
+    """
+    section_models = {
+        "general": GeneralConfig,
+        "data": DataConfig,
+        "training": TrainingConfig,
+        "wandb": WandBConfig,
+    }
+    
+    print("=" * 60)
+    print(" Configuration Parameters Help")
+    print("=" * 60)
+    
+    config_dict = config.model_dump()
+    
+    for section_name, model_class in section_models.items():
+        section_config = config_dict.get(section_name)
+        
+        if section_config is None:
+            continue
+            
+        if not isinstance(section_config, dict):
+            continue
+        
+        # pydantic v2: use model_fields
+        model_fields = getattr(model_class, 'model_fields', {})
+        
+        # filter fields with non-None values
+        fields_to_show = [
+            (name, info) for name, info in model_fields.items()
+            if name in section_config and section_config.get(name) is not None
+        ]
+        
+        if not fields_to_show:
+            continue
+        
+        print(f"\n[{section_name.upper()}]")
+        print("-" * 40)
+        
+        for field_name, field_info in fields_to_show:
+            description = field_info.description or "No description"
+            default_val = field_info.default
+            
+            # get type annotation
+            if hasattr(field_info, 'annotation'):
+                annotation = field_info.annotation
+                origin = get_origin(annotation)
+                
+                if origin is Union:
+                    args = get_args(annotation)
+                    if len(args) == 2 and type(None) in args:
+                        inner_type = args[0] if args[1] is type(None) else args[1]
+                        field_type = f"Optional[{getattr(inner_type, '__name__', str(inner_type))}]"
+                    else:
+                        field_type = str(annotation)
+                else:
+                    field_type = getattr(annotation, '__name__', str(annotation))
+            else:
+                field_type = "Unknown"
+            
+            current_val = section_config.get(field_name, "Not set")
+            
+            print(f"  {field_name} ({field_type})")
+            print(f"    Description: {description}")
+            print(f"    Default: {default_val}")
+            print(f"    Current: {current_val}")
+            print()

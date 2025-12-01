@@ -1,6 +1,5 @@
 import math
-import argparse
-from typing import Iterable, Dict, Any, Optional
+from typing import Iterable, Dict, Optional
 from timm.utils import accuracy
 from tqdm.auto import tqdm
 from accelerate import Accelerator
@@ -11,6 +10,7 @@ import torch
 
 from utils.misc import MetricTracker
 
+
 def train_one_epoch(
     model: torch.nn.Module,
     data_loader: Iterable, 
@@ -19,7 +19,7 @@ def train_one_epoch(
     scheduler: AcceleratedScheduler,
     accelerator: Accelerator, 
     epoch: int, 
-    args: Optional[argparse.Namespace] = None,
+    clip_grad: float | None = None,
     metrics_tracker: Optional[MetricTracker] = None
 ) -> Dict[str, float]:
     """
@@ -33,7 +33,7 @@ def train_one_epoch(
         scheduler: An `AcceleratedScheduler` instance from `accelerator.prepare()`.
         accelerator: Accelerator object for distributed training
         epoch: Current epoch number
-        args: Parsed arguments containing gradient clipping and batch size info
+        clip_grad: Gradient clipping norm (None for no clipping)
         metrics_tracker: Optional reusable MetricTracker instance
 
     Returns:
@@ -45,69 +45,31 @@ def train_one_epoch(
         RuntimeError: If loss becomes infinite or NaN
         ValueError: If invalid gradient clipping value is provided
         TypeError: If arguments have wrong types
-        
-    Example:
-        ```python
-        # standard distributed training with reusable metrics tracker
-        metrics_tracker = MetricTracker()
-        for epoch in range(num_epochs):
-            # The optimizer and scheduler must be prepared by `accelerate`
-            prepared_optimizer, prepared_scheduler = accelerator.prepare(optimizer, scheduler)
-            train_stats = train_one_epoch(
-                model=model,
-                data_loader=train_loader, 
-                criterion=criterion,
-                optimizer=prepared_optimizer,
-                scheduler=prepared_scheduler,
-                accelerator=accelerator,
-                epoch=epoch,
-                args=args,
-                metrics_tracker=metrics_tracker
-            )
-            print(f"Training Loss: {train_stats['loss']:.4f}")
-        ```
     """
-    # input validation
-    if not isinstance(model, torch.nn.Module):
-        raise TypeError(f"model must be a torch.nn.Module, got {type(model)}")
-    if not isinstance(criterion, torch.nn.Module):
-        raise TypeError(f"criterion must be a torch.nn.Module, got {type(criterion)}")
-    if not isinstance(optimizer, AcceleratedOptimizer):
-        raise TypeError(f"optimizer must be an `accelerate.optimizer.AcceleratedOptimizer`, got {type(optimizer)}")
-    if not isinstance(scheduler, AcceleratedScheduler):
-        raise TypeError(f"scheduler must be an `accelerate.scheduler.AcceleratedScheduler`, got {type(scheduler)}")
-    if not isinstance(accelerator, Accelerator):
-        raise TypeError(f"accelerator must be an Accelerator, got {type(accelerator)}")
-    if not isinstance(epoch, int):
-        raise TypeError(f"epoch must be an integer, got {type(epoch)}")
-    
     try:
         model.train()
         
-        # initialize or reset metrics tracker
         if metrics_tracker is None:
             metrics_tracker = MetricTracker()
         else:
             metrics_tracker.reset()
         
         progress_bar = tqdm(
-            range(len(data_loader)), 
+            data_loader, 
             disable=not accelerator.is_main_process,
             desc=f"Epoch {epoch}",
-            dynamic_ncols=True,
-            ncols=100
+            dynamic_ncols=True
         )
-
-        optimizer.zero_grad()
             
-        for _, (samples, targets) in enumerate(data_loader):
+        for samples, targets in progress_bar:
             batch_size = samples.size(0)
             
             with accelerator.accumulate(model):
+                optimizer.zero_grad()
+                
                 outputs = model(samples)
                 loss = criterion(outputs, targets)
                 
-                # store with batch size for accurate averaging
                 metrics_tracker.update({'loss': loss}, batch_size=batch_size)
                 
                 loss_value = loss.item()
@@ -121,18 +83,16 @@ def train_one_epoch(
                 accelerator.backward(loss)
                 
                 # gradient clipping
-                if args and hasattr(args, 'clip_grad') and args.clip_grad is not None:
-                    if args.clip_grad <= 0:
-                        raise ValueError(f"clip_grad must be positive, got {args.clip_grad}")
-                    accelerator.clip_grad_norm_(model.parameters(), args.clip_grad)
+                if clip_grad is not None:
+                    if clip_grad <= 0:
+                        raise ValueError(f"clip_grad must be positive, got {clip_grad}")
+                    accelerator.clip_grad_norm_(model.parameters(), clip_grad)
                 
                 optimizer.step()
                 scheduler.step()
-                optimizer.zero_grad()
                 
             # progress bar shows current local averages
             if accelerator.is_main_process:
-                progress_bar.update(1)
                 lr = optimizer.param_groups[0]["lr"]
                 current_averages = metrics_tracker.get_current_averages()
                 progress_bar.set_postfix({
@@ -167,84 +127,64 @@ def evaluate(
     model: torch.nn.Module,
     data_loader: Iterable, 
     criterion: torch.nn.Module,
-    accelerator: Accelerator
+    accelerator: Accelerator,
+    metrics_tracker: Optional[MetricTracker] = None 
 ) -> Dict[str, float]:
     """
-    Evaluate the model using Accelerate with improved accuracy calculation.
+    Evaluate the model using Accelerate.
 
     Args:
         model: PyTorch model to evaluate
         data_loader: PyTorch DataLoader for validation/test set
         criterion: PyTorch loss function
         accelerator: Accelerator object for distributed training
-
+        metrics_tracker: Optional reusable MetricTracker instance
+    
     Returns:
         Dictionary containing the global average for each metric:
         - loss: Average validation loss across all processes
         - acc1: Top-1 accuracy percentage
-        - acc5: Top-5 accuracy percentage
     
     Raises:
         RuntimeError: If evaluation encounters unexpected errors
         TypeError: If arguments have wrong types
-        
-    Example:
-        ```python
-        eval_stats = evaluate(
-            model=model,
-            data_loader=val_loader,
-            criterion=criterion,
-            accelerator=accelerator
-        )
-        print(f"Validation Acc@1: {eval_stats['acc1']:.2f}%")
-        print(f"Validation Loss: {eval_stats['loss']:.4f}")
-        ```
     """
-    # input validation
-    if not isinstance(model, torch.nn.Module):
-        raise TypeError(f"model must be a torch.nn.Module, got {type(model)}")
-    if not isinstance(criterion, torch.nn.Module):
-        raise TypeError(f"criterion must be a torch.nn.Module, got {type(criterion)}")
-    if not isinstance(accelerator, Accelerator):
-        raise TypeError(f"accelerator must be an Accelerator, got {type(accelerator)}")
-
     try:
         model.eval()
 
-        # initialize metrics tracker for evaluation
-        metrics_tracker = MetricTracker()
+        if metrics_tracker is None:
+            metrics_tracker = MetricTracker()
+        else:
+            metrics_tracker.reset()
         
         progress_bar = tqdm(
-            range(len(data_loader)), 
+            data_loader, 
             disable=not accelerator.is_main_process,
             desc="Evaluating",
-            dynamic_ncols=True,
-            ncols=100
+            dynamic_ncols=True
         )
 
-        for _, (images, targets) in enumerate(data_loader):
+        for images, targets in progress_bar:
             batch_size = images.size(0)
             
             outputs = model(images)
             loss = criterion(outputs, targets)
             
             # accuracy calculation - returns percentages
-            acc1, acc5 = accuracy(outputs, targets, topk=(1, 5))
+            acc1 = accuracy(outputs, targets)
             
             # update metrics tracker with batch results
             metrics_tracker.update({
                 'loss': loss,
                 'acc1': acc1,  # timm's accuracy already returns percentages
-                'acc5': acc5
             }, batch_size=batch_size)
             
             if accelerator.is_main_process:
-                progress_bar.update(1)
                 # show current running averages
                 current_averages = metrics_tracker.get_current_averages()
                 progress_bar.set_postfix({
                     'loss': f"{current_averages.get('loss', 0.0):.4f}",
-                    'acc1': f"{current_averages.get('acc1', 0.0):.2f}%"
+                    'acc1': f"{current_averages.get('acc1', 0.0):.4f}%"
                 })
 
         # clean up progress bar
@@ -256,9 +196,8 @@ def evaluate(
 
         if accelerator.is_main_process:
             acc1 = avg_stats.get("acc1", 0.0)
-            acc5 = avg_stats.get("acc5", 0.0)
             loss = avg_stats.get("loss", 0.0)
-            accelerator.print(f'* Acc@1: {acc1:.3f} Acc@5: {acc5:.3f} Loss: {loss:.3f} \n')
+            accelerator.print(f'* Acc@1: {acc1:.4f} Loss: {loss:.4f} \n')
             
         return avg_stats
         
