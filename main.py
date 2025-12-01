@@ -93,7 +93,7 @@ def main(args: argparse.Namespace) -> None:
     # --- Accelerate & WandB setting ---
     try:
         accelerator = Accelerator(
-            gradient_accumulation_steps=config.training.accum_iter,
+            gradient_accumulation_steps=config.training.grad_accum_steps,
             mixed_precision='fp16',
             log_with='wandb',
             project_dir=str(output_path)
@@ -197,7 +197,7 @@ def main(args: argparse.Namespace) -> None:
     # --- Training config (loss, optimizer, scheduler) ---
     criterion = nn.CrossEntropyLoss()
 
-    eff_batch_size = config.data.batch_size * config.training.accum_iter * accelerator.num_processes
+    eff_batch_size = config.data.batch_size * config.training.grad_accum_steps * accelerator.num_processes
     abs_lr = config.training.lr * eff_batch_size / 256
     
     # following timm: set wd as 0 for bias and norm layers
@@ -209,7 +209,7 @@ def main(args: argparse.Namespace) -> None:
     )
     
     # calculate total number of steps for the scheduler
-    num_update_steps_per_epoch = math.ceil(len(train_loader) / config.training.accum_iter)
+    num_update_steps_per_epoch = math.ceil(len(train_loader) / config.training.grad_accum_steps)
     num_training_steps = config.training.epoch * num_update_steps_per_epoch
     num_warmup_steps = config.training.warmup_epochs * num_update_steps_per_epoch
     
@@ -242,7 +242,7 @@ def main(args: argparse.Namespace) -> None:
             # log additional configurations to wandb through accelerator
             accelerator.log({
                 'config/batch_size_per_gpu': config.data.batch_size,
-                'config/gradient_accumulation_steps': config.training.accum_iter,
+                'config/gradient_accumulation_steps': config.training.grad_accum_steps,
                 'config/num_processes': accelerator.num_processes,
                 'config/effective_batch_size': eff_batch_size,
                 'config/num_parameters': n_parameters

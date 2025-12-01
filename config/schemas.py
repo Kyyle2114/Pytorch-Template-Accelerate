@@ -83,7 +83,7 @@ class TrainingConfig(ConfigBase):
         description="Weight decay for optimizer",
         ge=0
     )
-    accum_iter: int = Field(
+    grad_accum_steps: int = Field(
         default=1,
         description="Gradient accumulation steps to increase effective batch size",
         ge=1

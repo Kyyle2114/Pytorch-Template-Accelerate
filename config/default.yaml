@@ -19,7 +19,7 @@ training:
   patience: 50
   lr: 1e-3
   weight_decay: 1e-4
-  accum_iter: 1
+  grad_accum_steps: 1
   warmup_epochs: 10
   clip_grad: null   # null for no gradient clipping
 

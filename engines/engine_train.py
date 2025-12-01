@@ -1,3 +1,4 @@
+import sys
 import math
 from typing import Iterable, Dict, Optional
 from timm.utils import accuracy
@@ -56,7 +57,7 @@ def train_one_epoch(
         
         progress_bar = tqdm(
             data_loader, 
-            disable=not accelerator.is_main_process,
+            disable=not accelerator.is_main_process or not sys.stdout.isatty(),
             desc=f"Epoch {epoch}",
             dynamic_ncols=True
         )
@@ -159,7 +160,7 @@ def evaluate(
         
         progress_bar = tqdm(
             data_loader, 
-            disable=not accelerator.is_main_process,
+            disable=not accelerator.is_main_process or not sys.stdout.isatty(),
             desc="Evaluating",
             dynamic_ncols=True
         )

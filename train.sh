@@ -28,6 +28,6 @@ print_info "Starting training with config: ${CONFIG_FILE}"
 print_info "GPUs: $CUDA_VISIBLE_DEVICES (${N_GPUS} processes)"
 
 accelerate launch --num_processes=$N_GPUS --main_process_port 0 main.py \
-    --config "${CONFIG_FILE}"
+    --config "${CONFIG_FILE}" >> train.log 2>&1
 
 print_info "Training completed successfully!"

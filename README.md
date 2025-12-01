@@ -140,7 +140,7 @@ training:
   patience: 50
   lr: 1e-3
   weight_decay: 1e-4
-  accum_iter: 1
+  grad_accum_steps: 1
   warmup_epochs: 10
   clip_grad: null   # null for no gradient clipping
 
@@ -187,7 +187,7 @@ python main.py --help_config
 | | patience | int | 50 | Early stopping patience |
 | | lr | float | 1e-3 | Base learning rate |
 | | weight_decay | float | 1e-4 | Weight decay for optimizer |
-| | accum_iter | int | 1 | Gradient accumulation steps |
+| | grad_accum_steps | int | 1 | Gradient accumulation steps |
 | | warmup_epochs | int | 10 | Number of warmup epochs |
 | | clip_grad | float/null | null | Gradient clipping norm (null for no clipping) |
 | **wandb** | project_name | str | Model-Training | WandB project name |
@@ -257,7 +257,7 @@ training:
   patience: 30
   lr: 5e-4
   weight_decay: 1e-5
-  accum_iter: 2
+  grad_accum_steps: 2
   warmup_epochs: 5
   clip_grad: 1.0
 
@@ -277,7 +277,7 @@ python main.py --config config/my_config.yaml
 
 **1. CUDA Out of Memory**
 - Reduce `data.batch_size` in your config
-- Increase `training.accum_iter` to maintain effective batch size
+- Increase `training.grad_accum_steps` to maintain effective batch size
 
 **2. WandB Login Issues**
 - Set `WANDB_API_KEY` environment variable
