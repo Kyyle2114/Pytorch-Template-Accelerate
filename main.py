@@ -319,8 +319,8 @@ def main(args: argparse.Namespace) -> None:
                 # stats logging to file
                 if config.general.output_dir:
                     log_stats = {
-                        **{f'train_{k}': v for k, v in train_stats.items()},
-                        **{f'test_{k}': v for k, v in eval_stats.items()},
+                        **{f'train_{k}': f'{v:.6f}' for k, v in train_stats.items()},
+                        **{f'test_{k}': f'{v:.6f}' for k, v in eval_stats.items()},
                         'epoch': epoch,
                         'n_parameters': n_parameters,
                         'max_accuracy': max_accuracy

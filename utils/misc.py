@@ -245,7 +245,7 @@ class DistributedEarlyStopping:
         Returns:
             bool: True if early stopping should be triggered (synchronized across all processes)
         """
-        # Only main process updates counters to avoid race conditions
+        # only main process updates counters to avoid race conditions
         if accelerator.is_main_process:
             if self.mode == 'min':
                 if score < (self.best_score - self.delta):
